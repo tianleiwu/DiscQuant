@@ -95,13 +95,13 @@ class ClampSTE(torch.autograd.Function):
 
 class GroupFinite(BaseGrid):
     @torch.no_grad()
-    def __init__(self, W, wbits, groupsize, cache_down=False, cache_up=False, with_grad=False):
+    def __init__(self, W, wbits, groupsize, cache_down=False, cache_up=False, with_grad=False, symmetric=True):
         super().__init__(cache_down=cache_down, cache_up=cache_up, with_grad=with_grad)
         self.wbits     = wbits
         self.groupsize = groupsize
         from gptq.quant import Quantizer
         self.quantizer = Quantizer()
-        self.quantizer.configure(self.wbits)
+        self.quantizer.configure(self.wbits, sym=symmetric)
         self.rows = W.shape[0]
         self.cols = W.shape[1]
 

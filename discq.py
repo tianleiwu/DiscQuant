@@ -9,8 +9,14 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import numpy as np
 from contextlib import nullcontext
-import lm_eval
-import wandb
+try:
+    import lm_eval  # noqa: F401  (optional eval dependency; unused in the quant/export path)
+except ImportError:
+    lm_eval = None
+try:
+    import wandb  # optional; only used when --wandb is passed
+except ImportError:
+    wandb = None
 
 from utils import *
 from quantutils import *
@@ -196,7 +202,8 @@ def save_model(args, dtype, model, tokenizer, savename, mode='rdx'):
     Saves model. The mode argument is used to determine which is saved: original, our rounded weights, etc.
     '''
     model_to_save = transformers.AutoModelForCausalLM.from_pretrained(
-        args.model_id, trust_remote_code=True, torch_dtype=dtype)
+        args.model_id, trust_remote_code=True, torch_dtype=dtype,
+        attn_implementation='eager')
 
     for name, m in model.named_modules():
         if isinstance(m, quantize_linearlayer_multimode):
@@ -229,6 +236,14 @@ def save_model(args, dtype, model, tokenizer, savename, mode='rdx'):
         ort_dir = args.ort_savedir or (savename.rstrip('/') + '_ort')
         save_discquant_gptq(model, tokenizer, args.model_id, ort_dir, dtype, args)
 
+    # Optionally export a pre-quantized SYMMETRIC attention sidecar (ORT
+    # MatMulNBits layout) consumed by onnxruntime-genai via direct-read (no
+    # re-quant) -> symmetric (fast) AND lossless. Only meaningful for 'rdx'.
+    if getattr(args, 'export_prequant', False) and mode == 'rdx':
+        from prequant_export import save_prequant_sidecar
+        pq_dir = args.prequant_savedir or (savename.rstrip('/') + '_prequant')
+        save_prequant_sidecar(model, args, pq_dir)
+
 def train(args, devices):
     ## For each new model, need to define a quantlist which specifies the layers to be quantized.
     model_id = args.model_id
@@ -241,6 +256,14 @@ def train(args, devices):
         quantlist=['self_attn.q_proj','self_attn.k_proj','self_attn.v_proj','self_attn.o_proj','mlp.gate_proj','mlp.up_proj','mlp.down_proj']
     elif (model_id == 'meta-llama/Llama-2-7b-hf'):
         quantlist=['self_attn.q_proj','self_attn.k_proj','self_attn.v_proj','self_attn.o_proj','mlp.gate_proj','mlp.up_proj','mlp.down_proj']
+    elif (model_id == 'openai/gpt-oss-20b') or (model_id == 'openai/gpt-oss-120b'):
+        # Mixture-of-Experts model: quantize only the dense attention projections
+        # (plain nn.Linear). The MoE feed-forward weights live in fused 3D
+        # nn.Parameters (mlp.experts.gate_up_proj / down_proj) that DiscQuant's
+        # nn.Linear wrapper does not handle, and the small router (mlp.router) is
+        # left in full precision. Those expert weights are quantized downstream by
+        # ONNX Runtime's QMoE operator instead.
+        quantlist=['self_attn.q_proj','self_attn.k_proj','self_attn.v_proj','self_attn.o_proj']
     else:
         raise ValueError(f'Need to specify quantlist for {model_id}')
     if args.dtype == 'bfloat16':
@@ -252,11 +275,18 @@ def train(args, devices):
     else:
         raise NotImplementedError
     
-    ## Load model. Flash Attention is optional
+    ## Load model. Flash Attention is optional; fall back to sdpa when flash_attn
+    ## is not installed (e.g. gpt-oss defaults its config to flash_attention_2).
     device_map = args.device_map
-    model = transformers.AutoModelForCausalLM.from_pretrained(
-        model_id, torch_dtype=dtype, device_map=device_map, trust_remote_code=True, 
-        attn_implementation='flash_attention_2')
+    try:
+        model = transformers.AutoModelForCausalLM.from_pretrained(
+            model_id, torch_dtype=dtype, device_map=device_map, trust_remote_code=True, 
+            attn_implementation='flash_attention_2')
+    except (ImportError, ValueError):
+        print("flash_attention_2 unavailable; loading with attn_implementation='eager'")
+        model = transformers.AutoModelForCausalLM.from_pretrained(
+            model_id, torch_dtype=dtype, device_map=device_map, trust_remote_code=True, 
+            attn_implementation='eager')
     disable_dropout_in_model(model)
     ## Wraps all linear layers specified in quantlist with our quantized linear class
     quantize_model(model, quantlist, args)
@@ -485,7 +515,7 @@ def train(args, devices):
 
     ## Save model.
     if args.save_model:
-        save_name = os.path.join(args.output, f'checkpoints/{session}/quantized_model')
+        save_name = args.final_savedir or os.path.join(args.output, f'checkpoints/{session}/quantized_model')
         save_model(args, dtype, model, tokenizer, save_name)
     results_dict['done'] = True 
 

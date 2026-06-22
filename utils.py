@@ -21,6 +21,10 @@ def parse_args():
     parser.add_argument('--cache_down', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--wbits', type=int, default=4, help='wbits')
     parser.add_argument('--groupsize', type=int, default=-1, help='groupsize')
+    parser.add_argument('--symmetric', default=True, action=argparse.BooleanOptionalAction,
+                        help='Symmetric grid (zero=2^(b-1), scale=2*amax/maxq). Use --no-symmetric '
+                             'for an asymmetric grid (min->0, max->maxq), which is the exact fixed '
+                             "point of ONNX Runtime's RTN MatMulNBits re-quantization (lossless round-trip).")
     parser.add_argument('--optimizer', type=str, default='AdamW', choices=['SGD','AdamW'])
     parser.add_argument('--lr_sched', type=str, default='cosine', choices=['linear','cosine'])
     parser.add_argument('--number_of_iterations', type=int, default=1024, help='number of samples')
@@ -57,6 +61,24 @@ def parse_args():
     parser.add_argument('--ort_savedir', type=str, default=None,
                         help='Output directory for the ORT/genai checkpoint. '
                              'Defaults to "<save_name>_ort" when --export_ort is set.')
+    parser.add_argument('--final_savedir', type=str, default=None,
+                        help='Override directory for the final --save_model checkpoint '
+                             '(plain fp16 HF weights). Defaults to the auto-generated '
+                             'checkpoints/<session>/quantized_model path.')
+    parser.add_argument('--bit_placement', type=str, default='uniform',
+                        choices=['uniform', 'int8_mixed'],
+                        help='Per-layer bit-width policy. "uniform" uses --wbits everywhere. '
+                             '"int8_mixed" promotes the llama.cpp sensitivity set (first/last '
+                             'eighth of layers + every third layer\'s q/k/v_proj) to int8, the '
+                             'rest stay at --wbits. Mixed bits are carried per-tensor into the '
+                             'pre-quant sidecar and emitted as int4/int8 MatMulNBits.')
+    parser.add_argument('--export_prequant', default=False, action=argparse.BooleanOptionalAction,
+                        help='Also export a pre-quantized SYMMETRIC attention sidecar (ORT '
+                             'MatMulNBits layout) that onnxruntime-genai consumes via direct-read '
+                             '(no re-quant) -> symmetric (fast) AND lossless. Requires --symmetric.')
+    parser.add_argument('--prequant_savedir', type=str, default=None,
+                        help='Output directory for the pre-quant attention sidecar. '
+                             'Defaults to "<save_name>_prequant" when --export_prequant is set.')
 
     args = parser.parse_args()
 
@@ -98,6 +120,10 @@ def name_session(args):
         model_str='llama3.1_70b'
     elif args.model_id == 'meta-llama/Llama-2-7b-hf':
         model_str='llama2_7b'
+    elif args.model_id == 'openai/gpt-oss-20b':
+        model_str='gptoss20b'
+    elif args.model_id == 'openai/gpt-oss-120b':
+        model_str='gptoss120b'
     else:
         raise ValueError(f'Need to specify model_str for {args.model_id}')
     

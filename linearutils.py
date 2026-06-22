@@ -14,10 +14,12 @@ class quantize_linearlayer_multimode(torch.nn.Module):
     functions.
     ''' 
     @torch.no_grad()
-    def __init__(self, linear, args):
+    def __init__(self, linear, args, bits=None):
         super().__init__()
         self.mode = 'x' # 'x', 'rdx', 'original', 'greedy'
         self.linear = linear
+        # Per-layer bit-width override (mixed int4/int8). Falls back to args.wbits.
+        self._wbits = int(args.wbits if bits is None else bits)
         if args.quip:
             self.S_in  = torch.randint(0, 2, (linear.in_features,)) * 2 - 1
             self.S_out = torch.randint(0, 2, (linear.out_features,)) * 2 - 1
@@ -28,8 +30,8 @@ class quantize_linearlayer_multimode(torch.nn.Module):
         self.linear = torch.compile(linear)
 
         self.grid = GroupFinite(
-            linear.weight, args.wbits, args.groupsize, args.cache_down, args.cache_up, 
-            with_grad=False)
+            linear.weight, self._wbits, args.groupsize, args.cache_down, args.cache_up, 
+            with_grad=False, symmetric=getattr(args, 'symmetric', True))
 
         if args.init_x == 'rand':
             init_val = torch.rand_like(self.linear.weight)
@@ -177,7 +179,21 @@ def mysetattr(obj, attr_path, value):
 def quantize_model(model, quantlist, args):
     for param in model.parameters():
         param.requires_grad = False
-    
-    for layer in model.model.layers:
+
+    num_layers = len(model.model.layers)
+    for layer_id, layer in enumerate(model.model.layers):
         for name in quantlist:
-            mysetattr(layer, name, quantize_linearlayer_multimode(mygetattr(layer, name), args))
+            bits = _resolve_bits(args, layer_id, name, num_layers)
+            mysetattr(layer, name, quantize_linearlayer_multimode(mygetattr(layer, name), args, bits=bits))
+
+
+def _resolve_bits(args, layer_id, name, num_layers):
+    """Per-layer bit-width for mixed int4/int8 quantization.
+
+    Delegates to ``prequant_export.resolve_layer_bits`` when a non-uniform
+    ``--bit-placement`` is requested; otherwise returns ``args.wbits``.
+    """
+    if getattr(args, 'bit_placement', 'uniform') in (None, 'uniform'):
+        return int(args.wbits)
+    from prequant_export import resolve_layer_bits
+    return resolve_layer_bits(args, layer_id, name, num_layers)
