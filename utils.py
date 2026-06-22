@@ -51,6 +51,12 @@ def parse_args():
     parser.add_argument('--use_eval_ckpt', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--quip', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--half_gsm_data', default=False, action=argparse.BooleanOptionalAction, help='replaces half of dataset with GSM')
+    parser.add_argument('--export_ort', default=False, action=argparse.BooleanOptionalAction,
+                        help='Also export an ONNX Runtime / onnxruntime-genai compatible '
+                             '(AutoGPTQ-format, quant_method="discquant") checkpoint next to the saved model.')
+    parser.add_argument('--ort_savedir', type=str, default=None,
+                        help='Output directory for the ORT/genai checkpoint. '
+                             'Defaults to "<save_name>_ort" when --export_ort is set.')
 
     args = parser.parse_args()
 

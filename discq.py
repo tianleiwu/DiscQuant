@@ -221,6 +221,14 @@ def save_model(args, dtype, model, tokenizer, savename, mode='rdx'):
     tokenizer.save_pretrained(savename)
     del model_to_save
 
+    # Optionally export an ONNX Runtime / onnxruntime-genai compatible checkpoint
+    # (AutoGPTQ tensor layout, quant_method="discquant"). Only meaningful for the
+    # rounded DiscQuant solution ('rdx'), which export_layer reconstructs from `x`.
+    if getattr(args, 'export_ort', False) and mode == 'rdx':
+        from export_ort import save_discquant_gptq
+        ort_dir = args.ort_savedir or (savename.rstrip('/') + '_ort')
+        save_discquant_gptq(model, tokenizer, args.model_id, ort_dir, dtype, args)
+
 def train(args, devices):
     ## For each new model, need to define a quantlist which specifies the layers to be quantized.
     model_id = args.model_id
